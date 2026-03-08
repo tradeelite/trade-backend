@@ -1,9 +1,7 @@
 """Pydantic request/response schemas."""
 
 from datetime import datetime
-from typing import Any
-
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel
 
 
 # ---------------------------------------------------------------------------
@@ -21,8 +19,7 @@ class PortfolioUpdate(BaseModel):
 
 
 class PortfolioOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    id: int
+    id: str
     name: str
     description: str | None
     created_at: datetime
@@ -48,9 +45,8 @@ class HoldingCreate(BaseModel):
 
 
 class HoldingOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    id: int
-    portfolio_id: int
+    id: str
+    portfolio_id: str
     ticker: str
     shares: float
     avg_cost: float
@@ -87,8 +83,7 @@ class OptionTradeUpdate(BaseModel):
 
 
 class OptionTradeOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    id: int
+    id: str
     ticker: str
     option_type: str
     direction: str

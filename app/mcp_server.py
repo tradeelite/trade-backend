@@ -2,9 +2,11 @@
 
 from mcp.server.fastmcp import FastMCP
 
+from app.services import fundamentals as fund_svc
 from app.services import indicators as ind_svc
 from app.services import stocktwits, yahoo_finance as yf_svc
 from app.services import suggestions as sug_svc
+from app.services import technical_signals as ts_svc
 
 mcp = FastMCP("trade-backend")
 
@@ -67,6 +69,21 @@ def get_technical_indicators(ticker: str, range: str = "3M") -> dict:
 
 
 @mcp.tool()
+def get_technical_signals(ticker: str) -> dict:
+    """Get all Tier 1 technical indicator signals computed from 400 days of daily OHLCV data.
+
+    Returns a composite score (0-10), per-indicator Buy/Sell/Neutral signals, and a full
+    breakdown of: SMA 20/50/200, EMA 9/21/50, RSI(14), MACD(12,26,9), Stochastic(14,3,3),
+    Williams %R(14), Bollinger Bands(20,2), ATR(14), ADX(14), OBV, Relative Volume.
+    Also includes golden/death cross status and distance from 52-week range and 200 SMA.
+
+    Args:
+        ticker: Stock ticker symbol (e.g. AAPL, MSFT, NVDA).
+    """
+    return ts_svc.compute_technical_signals(ticker.upper())
+
+
+@mcp.tool()
 def get_stock_news(ticker: str) -> list[dict]:
     """Get latest news articles for a stock (title, publisher, URL, published time).
 
@@ -87,55 +104,100 @@ async def get_stock_sentiment(ticker: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Fundamental tools
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def get_fundamentals(ticker: str) -> dict:
+    """Get fundamental financial metrics: P/E, forward P/E, PEG, margins, ROE, debt ratios.
+
+    Args:
+        ticker: Stock ticker symbol (e.g. AAPL, MSFT).
+    """
+    return fund_svc.get_fundamentals(ticker.upper())
+
+
+@mcp.tool()
+def get_analyst_ratings(ticker: str) -> dict:
+    """Get analyst consensus ratings: buy/hold/sell counts, target price, recommendation.
+
+    Args:
+        ticker: Stock ticker symbol.
+    """
+    return fund_svc.get_analyst_ratings(ticker.upper())
+
+
+@mcp.tool()
+def get_earnings_history(ticker: str) -> list[dict]:
+    """Get last 4 quarters of earnings history: estimated EPS, actual EPS, surprise %.
+
+    Args:
+        ticker: Stock ticker symbol.
+    """
+    return fund_svc.get_earnings_history(ticker.upper())
+
+
+@mcp.tool()
+def get_volume_analysis(ticker: str) -> dict:
+    """Get volume analysis: avg 20/50-day volume, current volume, relative volume, trend.
+
+    Args:
+        ticker: Stock ticker symbol.
+    """
+    return fund_svc.get_volume_analysis(ticker.upper())
+
+
+# ---------------------------------------------------------------------------
 # Portfolio tools
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
 async def get_portfolios() -> list[dict]:
-    """Get all portfolios with total value, cost basis, and gain/loss summary."""
-    from app.db.database import AsyncSessionLocal
-    from app.db.models import Holding, Portfolio
-    from sqlalchemy import select
-    import asyncio
+    """Get all portfolios with holdings count."""
+    from app.db.firestore import get_firestore
+    from app.db.repositories.holdings import HoldingRepository
+    from app.db.repositories.portfolios import PortfolioRepository
 
-    async with AsyncSessionLocal() as db:
-        result = await db.execute(select(Portfolio))
-        portfolios = result.scalars().all()
-        out = []
-        for p in portfolios:
-            hr = await db.execute(select(Holding).where(Holding.portfolio_id == p.id))
-            holdings = hr.scalars().all()
-            out.append({
-                "id": p.id, "name": p.name, "description": p.description,
-                "holdingsCount": len(holdings),
-            })
-        return out
+    db = get_firestore()
+    portfolio_repo = PortfolioRepository(db)
+    holding_repo = HoldingRepository(db)
+
+    portfolios = await portfolio_repo.get_all()
+    out = []
+    for p in portfolios:
+        holdings = await holding_repo.get_by_portfolio(p["id"])
+        out.append({
+            "id": p["id"], "name": p["name"], "description": p.get("description"),
+            "holdingsCount": len(holdings),
+        })
+    return out
 
 
 @mcp.tool()
-async def get_portfolio_holdings(portfolio_id: int) -> list[dict]:
+async def get_portfolio_holdings(portfolio_id: str) -> list[dict]:
     """Get all holdings for a portfolio with live price valuations.
 
     Args:
-        portfolio_id: Numeric portfolio ID.
+        portfolio_id: Portfolio document ID.
     """
-    from app.db.database import AsyncSessionLocal
-    from app.db.models import Holding
-    from sqlalchemy import select
     import asyncio
+    from app.db.firestore import get_firestore
+    from app.db.repositories.holdings import HoldingRepository
 
-    async with AsyncSessionLocal() as db:
-        result = await db.execute(select(Holding).where(Holding.portfolio_id == portfolio_id))
-        holdings = result.scalars().all()
+    holding_repo = HoldingRepository(get_firestore())
+    holdings = await holding_repo.get_by_portfolio(portfolio_id)
 
-    async def _enrich(h):
-        base = {"ticker": h.ticker, "shares": h.shares, "avgCost": h.avg_cost}
+    async def _enrich(h: dict) -> dict:
+        base = {"ticker": h["ticker"], "shares": h["shares"], "avgCost": h["avg_cost"]}
         try:
-            price = yf_svc.get_quote(h.ticker)["price"]
-            value = h.shares * price
-            cost = h.shares * h.avg_cost
-            base.update({"currentPrice": price, "currentValue": round(value, 2),
-                          "gainLoss": round(value - cost, 2)})
+            price = yf_svc.get_quote(h["ticker"])["price"]
+            value = h["shares"] * price
+            cost = h["shares"] * h["avg_cost"]
+            base.update({
+                "currentPrice": price,
+                "currentValue": round(value, 2),
+                "gainLoss": round(value - cost, 2),
+            })
         except Exception:
             pass
         return base
@@ -154,43 +216,35 @@ async def get_options_trades(status: str = "open") -> list[dict]:
     Args:
         status: Filter — "open", "closed", or "all". Defaults to "open".
     """
-    from app.db.database import AsyncSessionLocal
-    from app.db.models import OptionTrade
-    from sqlalchemy import select
+    from app.db.firestore import get_firestore
+    from app.db.repositories.options import OptionRepository
 
-    async with AsyncSessionLocal() as db:
-        q = select(OptionTrade)
-        if status in ("open", "closed"):
-            q = q.where(OptionTrade.status == status)
-        result = await db.execute(q)
-        trades = result.scalars().all()
-        return [
-            {
-                "id": t.id, "ticker": t.ticker, "optionType": t.option_type,
-                "direction": t.direction, "strikePrice": t.strike_price,
-                "expiryDate": t.expiry_date, "premium": t.premium,
-                "quantity": t.quantity, "status": t.status,
-                "closePremium": t.close_premium, "closeDate": t.close_date,
-            }
-            for t in trades
-        ]
+    repo = OptionRepository(get_firestore())
+    trades = await repo.get_all(status=status)
+    return [
+        {
+            "id": t["id"], "ticker": t["ticker"], "optionType": t["option_type"],
+            "direction": t["direction"], "strikePrice": t["strike_price"],
+            "expiryDate": t["expiry_date"], "premium": t["premium"],
+            "quantity": t["quantity"], "status": t["status"],
+            "closePremium": t.get("close_premium"), "closeDate": t.get("close_date"),
+        }
+        for t in trades
+    ]
 
 
 @mcp.tool()
 async def get_options_suggestions() -> list[dict]:
     """Get rule-based suggestions for open options positions (profit targets, DTE, assignment risk, earnings)."""
-    from app.db.database import AsyncSessionLocal
-    from app.db.models import OptionTrade
-    from sqlalchemy import select
     import asyncio
+    from app.db.firestore import get_firestore
+    from app.db.repositories.options import OptionRepository
 
-    async with AsyncSessionLocal() as db:
-        result = await db.execute(select(OptionTrade).where(OptionTrade.status == "open"))
-        trades = result.scalars().all()
+    repo = OptionRepository(get_firestore())
+    trades = await repo.get_all(status="open")
+    tickers = list({t["ticker"] for t in trades})
 
-    tickers = list({t.ticker for t in trades})
-
-    async def _price(ticker):
+    async def _price(ticker: str) -> tuple[str, float | None]:
         try:
             return ticker, yf_svc.get_quote(ticker)["price"]
         except Exception:
@@ -198,11 +252,4 @@ async def get_options_suggestions() -> list[dict]:
 
     price_results = await asyncio.gather(*[_price(t) for t in tickers])
     prices = {t: p for t, p in price_results if p is not None}
-    trade_dicts = [
-        {"id": t.id, "ticker": t.ticker, "option_type": t.option_type,
-         "direction": t.direction, "strike_price": t.strike_price,
-         "expiry_date": t.expiry_date, "premium": t.premium,
-         "quantity": t.quantity, "status": t.status}
-        for t in trades
-    ]
-    return sug_svc.evaluate_all(trade_dicts, prices)
+    return sug_svc.evaluate_all(trades, prices)
