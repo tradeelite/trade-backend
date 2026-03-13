@@ -34,6 +34,39 @@ def _normalize_analysis(raw: dict) -> dict:
         """Ensure value is a dict; return {} if it's a string or None."""
         return v if isinstance(v, dict) else {}
 
+    def _to_float(v):
+        """Best-effort numeric coercion for model outputs (handles scalar/list/dict/string)."""
+        if v is None:
+            return None
+        if isinstance(v, (int, float)):
+            return float(v)
+        if isinstance(v, list):
+            for item in v:
+                coerced = _to_float(item)
+                if coerced is not None:
+                    return coerced
+            return None
+        if isinstance(v, dict):
+            # Prefer common numeric keys first.
+            for k in ("value", "current", "mean", "number"):
+                if k in v:
+                    coerced = _to_float(v.get(k))
+                    if coerced is not None:
+                        return coerced
+            # Fallback: first coercible value.
+            for item in v.values():
+                coerced = _to_float(item)
+                if coerced is not None:
+                    return coerced
+            return None
+        try:
+            s = str(v).strip().replace("%", "").replace(",", "")
+            if not s:
+                return None
+            return float(s)
+        except Exception:
+            return None
+
     tech = _d(raw.get("technical"))
     fund = _d(raw.get("fundamental"))
     news = _d(raw.get("news"))
@@ -209,9 +242,22 @@ def _normalize_analysis(raw: dict) -> dict:
     growth = _d(fund.get("growth"))
     analyst = _d(fund.get("analystConsensus"))
     earnings_raw = _d(fund.get("earnings") or fund.get("earningsHistory"))
+    attrs = _d(fund.get("attributes"))
+    ai_analysis = _d(fund.get("aiAnalysis"))
 
-    pe = val.get("peRatio") or val.get("pe_ratio") or fund.get("peRatio")
-    val_signal = val.get("signal") or ("overvalued" if pe and float(pe) > 35 else "undervalued" if pe and float(pe) < 15 else "fairly_valued")
+    attr_valuation = _d(attrs.get("valuation"))
+    attr_growth = _d(attrs.get("growth"))
+    attr_fin_strength = _d(attrs.get("financialStrength"))
+    attr_analyst = _d(attrs.get("analystSentiment"))
+
+    pe = (
+        val.get("peRatio")
+        or val.get("pe_ratio")
+        or fund.get("peRatio")
+        or _d(attr_valuation.get("metrics")).get("pe")
+    )
+    pe_num = _to_float(pe)
+    val_signal = val.get("signal") or ("overvalued" if pe_num is not None and pe_num > 35 else "undervalued" if pe_num is not None and pe_num < 15 else "fairly_valued")
 
     breakdown = _d(analyst.get("breakdown"))
     if not breakdown:
@@ -235,45 +281,51 @@ def _normalize_analysis(raw: dict) -> dict:
     else:
         earnings_trend = "inline"
 
+    # Backward-compatible fields + full pass-through for enhanced schema.
     normalized_fund = {
         "ticker": raw.get("ticker", ""),
+        "asOf": fund.get("asOf"),
+        "priceContext": fund.get("priceContext"),
+        "attributes": attrs or None,
+        "aiAnalysis": ai_analysis or None,
+        "sources": fund.get("sources") or [],
         "valuation": {
             "signal": val_signal,
-            "peRatio": float(pe) if pe is not None else None,
-            "forwardPE": val.get("forwardPE") or val.get("forward_pe"),
-            "pegRatio": val.get("pegRatio") or val.get("peg_ratio") or val.get("pegRatio"),
-            "priceToBook": val.get("priceToBook") or val.get("priceToBookRatio") or val.get("price_to_book"),
+            "peRatio": pe_num,
+            "forwardPE": _to_float(val.get("forwardPE") or val.get("forward_pe") or _d(attr_valuation.get("metrics")).get("forwardPe")),
+            "pegRatio": _to_float(val.get("pegRatio") or val.get("peg_ratio") or _d(attr_valuation.get("metrics")).get("peg")),
+            "priceToBook": _to_float(val.get("priceToBook") or val.get("priceToBookRatio") or val.get("price_to_book") or _d(attr_valuation.get("metrics")).get("priceToBook")),
         },
         "financialHealth": {
-            "signal": _normalize_signal(health.get("signal") or health.get("overallHealth") or "moderate"),
-            "debtToEquity": health.get("debtToEquity") or health.get("debtToEquityRatio"),
-            "currentRatio": health.get("currentRatio"),
+            "signal": health.get("signal") or health.get("overallHealth") or ("strong" if attr_fin_strength.get("signal") == "bullish" else "weak" if attr_fin_strength.get("signal") == "bearish" else "moderate"),
+            "debtToEquity": _to_float(health.get("debtToEquity") or health.get("debtToEquityRatio") or _d(attr_fin_strength.get("metrics")).get("debtToEquity")),
+            "currentRatio": _to_float(health.get("currentRatio") or _d(attr_fin_strength.get("metrics")).get("currentRatio")),
             "operatingMargin": str(health.get("operatingMargin") or health.get("profitMargin") or "N/A"),
             "returnOnEquity": str(health.get("returnOnEquity") or "N/A"),
         },
         "growth": {
-            "signal": _normalize_signal(growth.get("signal") or "moderate"),
-            "revenueGrowth": str(growth.get("revenueGrowth") or "N/A"),
-            "earningsGrowth": str(growth.get("earningsGrowth") or growth.get("epsGrowth") or "N/A"),
-            "epsTTM": growth.get("epsTTM") or growth.get("eps"),
+            "signal": growth.get("signal") or ("strong" if attr_growth.get("signal") == "bullish" else "weak" if attr_growth.get("signal") == "bearish" else "moderate"),
+            "revenueGrowth": str(growth.get("revenueGrowth") or _d(attr_growth.get("metrics")).get("revenueGrowthYoYPercent") or "N/A"),
+            "earningsGrowth": str(growth.get("earningsGrowth") or growth.get("epsGrowth") or _d(attr_growth.get("metrics")).get("epsGrowthYoYPercent") or "N/A"),
+            "epsTTM": _to_float(growth.get("epsTTM") or growth.get("eps")),
         },
         "analystConsensus": {
-            "rating": str(analyst.get("rating") or "Hold"),
-            "targetPrice": analyst.get("targetPrice") or analyst.get("target_price"),
-            "numAnalysts": analyst.get("numAnalysts") or analyst.get("num_analysts") or 0,
+            "rating": str(analyst.get("rating") or _d(attr_analyst.get("metrics")).get("consensus") or "Hold"),
+            "targetPrice": _to_float(analyst.get("targetPrice") or analyst.get("target_price") or _d(attr_analyst.get("metrics")).get("targetMean")),
+            "numAnalysts": int(_to_float(analyst.get("numAnalysts") or analyst.get("num_analysts") or _d(attr_analyst.get("metrics")).get("numAnalysts")) or 0),
             "breakdown": {
-                "strongBuy": int(breakdown.get("strongBuy") or breakdown.get("strong_buy") or 0),
-                "buy": int(breakdown.get("buy") or 0),
-                "hold": int(breakdown.get("hold") or 0),
-                "sell": int(breakdown.get("sell") or breakdown.get("strongSell") or 0),
+                "strongBuy": int(breakdown.get("strongBuy") or breakdown.get("strong_buy") or _d(attr_analyst.get("metrics")).get("strongBuy") or 0),
+                "buy": int(breakdown.get("buy") or _d(attr_analyst.get("metrics")).get("buy") or 0),
+                "hold": int(breakdown.get("hold") or _d(attr_analyst.get("metrics")).get("hold") or 0),
+                "sell": int(breakdown.get("sell") or breakdown.get("strongSell") or (_d(attr_analyst.get("metrics")).get("sell") or 0) + (_d(attr_analyst.get("metrics")).get("strongSell") or 0)),
             },
         },
         "earnings": {
             "trend": earnings_trend,
             "lastQuarters": earnings_quarters,
         },
-        "recommendation": fund.get("recommendation") or "Hold",
-        "summary": fund.get("summary") or fund.get("description") or "",
+        "recommendation": fund.get("recommendation") or ai_analysis.get("recommendation") or "Hold",
+        "summary": fund.get("summary") or ai_analysis.get("finalExplanation") or fund.get("description") or "",
     }
 
     # ── News ───────────────────────────────────────────────────────────────
@@ -317,9 +369,184 @@ def _normalize_analysis(raw: dict) -> dict:
         "executiveSummary": raw.get("executiveSummary") or raw.get("summary") or "",
     }
 
+
+def _normalize_fundamental_only(raw: dict, ticker: str) -> dict:
+    """Normalize a fundamental-only payload into frontend FundamentalAnalysis schema."""
+    # Accept either the fundamental object itself or a wrapped stock-analysis object.
+    fundamental_payload = raw.get("fundamental") if isinstance(raw.get("fundamental"), dict) else raw
+    wrapped = {
+        "ticker": ticker,
+        "overallSignal": "neutral",
+        "overallRecommendation": "Hold",
+        "confidence": "medium",
+        "shortTerm": "neutral",
+        "mediumTerm": "neutral",
+        "longTerm": "neutral",
+        "technical": {},
+        "fundamental": fundamental_payload,
+        "news": {},
+        "executiveSummary": "",
+    }
+    normalized = _normalize_analysis(wrapped)["fundamental"]
+    return _ensure_enhanced_fundamental_shape(normalized)
+
+
+def _ensure_enhanced_fundamental_shape(fund: dict) -> dict:
+    """Backfill enhanced attributes/aiAnalysis when upstream model returns legacy shape."""
+    if isinstance(fund.get("attributes"), dict) and isinstance(fund.get("aiAnalysis"), dict):
+        return fund
+
+    def _num(v):
+        if isinstance(v, (int, float)):
+            return float(v)
+        try:
+            s = str(v).strip().replace("%", "").replace(",", "")
+            if not s or s.lower() == "n/a":
+                return None
+            return float(s)
+        except Exception:
+            return None
+
+    def _signal_from_text(v: str | None) -> str:
+        s = (v or "").lower()
+        if "buy" in s or "bull" in s or "under" in s or "strong" in s:
+            return "bullish"
+        if "sell" in s or "bear" in s or "over" in s or "weak" in s:
+            return "bearish"
+        return "neutral"
+
+    def _score_from_signal(signal: str) -> int:
+        return 8 if signal == "bullish" else 3 if signal == "bearish" else 5
+
+    valuation = fund.get("valuation", {}) if isinstance(fund.get("valuation"), dict) else {}
+    health = fund.get("financialHealth", {}) if isinstance(fund.get("financialHealth"), dict) else {}
+    growth = fund.get("growth", {}) if isinstance(fund.get("growth"), dict) else {}
+    analyst = fund.get("analystConsensus", {}) if isinstance(fund.get("analystConsensus"), dict) else {}
+
+    val_sig = _signal_from_text(valuation.get("signal"))
+    growth_sig = _signal_from_text(growth.get("signal"))
+    health_sig = _signal_from_text(health.get("signal"))
+    analyst_sig = _signal_from_text(analyst.get("rating"))
+    rec_sig = _signal_from_text(fund.get("recommendation"))
+
+    attributes = {
+        "valuation": {
+            "signal": val_sig,
+            "score": _score_from_signal(val_sig),
+            "metrics": {
+                "pe": _num(valuation.get("peRatio")),
+                "forwardPe": _num(valuation.get("forwardPE")),
+                "peg": _num(valuation.get("pegRatio")),
+                "priceToBook": _num(valuation.get("priceToBook")),
+            },
+            "explanation": "Derived from valuation multiples available in the current analysis payload.",
+        },
+        "growth": {
+            "signal": growth_sig,
+            "score": _score_from_signal(growth_sig),
+            "metrics": {
+                "revenueGrowthYoYPercent": _num(growth.get("revenueGrowth")),
+                "epsGrowthYoYPercent": _num(growth.get("earningsGrowth")),
+                "epsTtm": _num(growth.get("epsTTM")),
+            },
+            "explanation": "Based on reported revenue and earnings growth values.",
+        },
+        "profitability": {
+            "signal": health_sig,
+            "score": _score_from_signal(health_sig),
+            "metrics": {
+                "operatingMarginPercent": _num(health.get("operatingMargin")),
+                "roePercent": _num(health.get("returnOnEquity")),
+            },
+            "explanation": "Estimated from operating margin and ROE where available.",
+        },
+        "financialStrength": {
+            "signal": health_sig,
+            "score": _score_from_signal(health_sig),
+            "metrics": {
+                "debtToEquity": _num(health.get("debtToEquity")),
+                "currentRatio": _num(health.get("currentRatio")),
+            },
+            "explanation": "Balance-sheet strength inferred from leverage and liquidity metrics.",
+        },
+        "cashFlowQuality": {
+            "signal": "neutral",
+            "score": 5,
+            "metrics": {},
+            "explanation": "Insufficient explicit cash-flow detail in upstream payload; marked neutral.",
+        },
+        "earningsQuality": {
+            "signal": "neutral",
+            "score": 5,
+            "metrics": {},
+            "explanation": "Limited quarter-level earnings surprise detail available in upstream payload.",
+        },
+        "capitalAllocation": {
+            "signal": "neutral",
+            "score": 5,
+            "metrics": {},
+            "explanation": "Dividend/buyback/share-count trend data not present in upstream payload.",
+        },
+        "analystSentiment": {
+            "signal": analyst_sig,
+            "score": _score_from_signal(analyst_sig),
+            "metrics": {
+                "consensus": analyst.get("rating"),
+                "targetMean": _num(analyst.get("targetPrice")),
+                "numAnalysts": int(_num(analyst.get("numAnalysts")) or 0),
+            },
+            "explanation": "Built from analyst consensus rating and target price.",
+        },
+        "businessQualityMoat": {
+            "signal": "neutral",
+            "score": 5,
+            "metrics": {},
+            "explanation": "Moat/segment breakdown was not provided in upstream response.",
+        },
+        "risksRedFlags": {
+            "signal": "neutral",
+            "score": 5,
+            "items": [],
+            "explanation": "No explicit risks list in upstream fundamental payload.",
+        },
+    }
+
+    overall_score = float(
+        round(
+            sum(
+                float(v.get("score", 5))
+                for v in attributes.values()
+                if isinstance(v, dict)
+            )
+            / 10.0
+            * 10.0,
+            1,
+        )
+    )
+
+    recommendation = fund.get("recommendation") or ("Buy" if overall_score >= 65 else "Hold")
+    fund["attributes"] = attributes
+    fund["aiAnalysis"] = {
+        "overallScore": overall_score,
+        "recommendation": recommendation,
+        "confidence": "medium",
+        "horizonView": {
+            "shortTerm": rec_sig,
+            "mediumTerm": rec_sig,
+            "longTerm": rec_sig,
+        },
+        "bullCase": [],
+        "bearCase": [],
+        "keyDrivers": [],
+        "finalExplanation": fund.get("summary") or "AI recommendation synthesized from available valuation, growth, health, and analyst fields.",
+    }
+    fund["sources"] = fund.get("sources") or []
+    return fund
+
 VALID_RANGES = {"1D", "1W", "1M", "3M", "1Y", "5Y"}
 
 _analysis_cache: dict[str, tuple[float, dict]] = {}
+_fundamental_cache: dict[str, tuple[float, dict]] = {}
 _CACHE_TTL = 600  # 10 minutes
 
 
@@ -541,6 +768,128 @@ async def ai_analysis(ticker: str):
 
     except Exception as e:
         raise HTTPException(500, f"AI analysis failed: {e}")
+
+
+@router.get("/{ticker}/fundamental-analysis")
+async def fundamental_analysis(ticker: str):
+    ticker = ticker.upper()
+    now = time.time()
+    if ticker in _fundamental_cache:
+        ts, data = _fundamental_cache[ticker]
+        if now - ts < _CACHE_TTL:
+            return data
+
+    if not settings.tradeview_agent_resource_id:
+        raise HTTPException(503, "Agent not configured — set TRADEVIEW_AGENT_RESOURCE_ID")
+
+    try:
+        import json
+        import re
+        import vertexai
+        from vertexai import agent_engines
+
+        vertexai.init(
+            project=settings.google_cloud_project,
+            location=settings.google_cloud_location,
+        )
+
+        remote_agent = agent_engines.get(settings.tradeview_agent_resource_id)
+        user_id = f"fundamental-analysis-{ticker}"
+        session = remote_agent.create_session(user_id=user_id)
+        session_id = session["id"]
+
+        message = (
+            f"Perform a complete fundamental analysis for {ticker}. "
+            "Delegate to fundamental_analyst sub-agent. Return structured JSON only."
+        )
+
+        response_text = ""
+        event_reprs: list[str] = []
+        result = None
+        state_keys: list[str] = []
+
+        try:
+            for event in remote_agent.stream_query(
+                user_id=user_id,
+                session_id=session_id,
+                message=message,
+            ):
+                event_reprs.append(repr(event)[:200])
+                if hasattr(event, "text") and event.text:
+                    response_text += event.text
+                elif isinstance(event, dict):
+                    content = event.get("content", {})
+                    if isinstance(content, dict):
+                        for part in content.get("parts", []):
+                            if isinstance(part, dict) and part.get("text"):
+                                response_text += part["text"]
+                elif hasattr(event, "content") and event.content:
+                    for part in getattr(event.content, "parts", []):
+                        if hasattr(part, "text") and part.text:
+                            response_text += part.text
+
+            session_data = remote_agent.get_session(user_id=user_id, session_id=session_id)
+            if isinstance(session_data, dict):
+                state = session_data.get("state", {}) or {}
+            else:
+                state = getattr(session_data, "state", None) or {}
+            state_keys = list(state.keys()) if isinstance(state, dict) else []
+
+            for key in state_keys:
+                raw_state = state[key]
+                if not raw_state:
+                    continue
+                try:
+                    if isinstance(raw_state, dict):
+                        candidate = raw_state
+                    else:
+                        cleaned = re.sub(r"^```(?:json)?\s*", "", str(raw_state).strip())
+                        cleaned = re.sub(r"\s*```$", "", cleaned.strip())
+                        json_match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+                        candidate = json.loads(json_match.group()) if json_match else None
+
+                    if isinstance(candidate, dict):
+                        has_fundamental_shape = (
+                            isinstance(candidate.get("attributes"), dict)
+                            or isinstance(candidate.get("aiAnalysis"), dict)
+                            or isinstance(candidate.get("fundamental"), dict)
+                            or ("ticker" in candidate and ("valuation" in candidate or "summary" in candidate))
+                        )
+                        if has_fundamental_shape:
+                            result = candidate
+                            break
+                except Exception:
+                    pass
+
+            if result is None and response_text.strip():
+                try:
+                    cleaned = re.sub(r"^```(?:json)?\s*", "", response_text.strip())
+                    cleaned = re.sub(r"\s*```$", "", cleaned.strip())
+                    json_match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+                    if json_match:
+                        result = json.loads(json_match.group())
+                except Exception:
+                    pass
+        finally:
+            try:
+                remote_agent.delete_session(user_id=user_id, session_id=session_id)
+            except Exception:
+                pass
+
+        if result is None:
+            raise ValueError(
+                f"No fundamental output. State keys={state_keys}, "
+                f"response_len={len(response_text)}, "
+                f"response_sample={response_text[:300]!r}, "
+                f"events={event_reprs[:3]}"
+            )
+
+        normalized = _normalize_fundamental_only(result, ticker)
+        _fundamental_cache[ticker] = (now, normalized)
+        return normalized
+
+    except Exception as e:
+        raise HTTPException(500, f"Fundamental analysis failed: {e}")
 
 
 @router.get("/earnings")
