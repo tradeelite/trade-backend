@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from app.db.firestore import get_firestore
 from app.db.repositories.options import OptionRepository
 from app.db.schemas import OptionTradeCreate, OptionTradeUpdate
+from app.routers.auth import get_request_user_email
 from app.services import ocr as ocr_svc
 from app.services import suggestions as sug_svc
 from app.services import yahoo_finance as yf_svc
@@ -20,24 +21,25 @@ def get_option_repo() -> OptionRepository:
 
 
 OptionDB = Annotated[OptionRepository, Depends(get_option_repo)]
+UserEmail = Annotated[str, Depends(get_request_user_email)]
 
 
 @router.get("")
-async def list_trades(repo: OptionDB, status: str = Query(None)):
-    return await repo.get_all(status=status)
+async def list_trades(repo: OptionDB, user_email: UserEmail, status: str = Query(None)):
+    return await repo.get_all(user_email=user_email, status=status)
 
 
 @router.post("", status_code=201)
-async def create_trade(body: OptionTradeCreate, repo: OptionDB):
+async def create_trade(body: OptionTradeCreate, repo: OptionDB, user_email: UserEmail):
     data = body.model_dump()
     data["ticker"] = data["ticker"].upper()
     data["status"] = "open"
-    return await repo.create(data)
+    return await repo.create(data, user_email=user_email)
 
 
 @router.get("/suggestions")
-async def suggestions(repo: OptionDB):
-    trades = await repo.get_all(status="open")
+async def suggestions(repo: OptionDB, user_email: UserEmail):
+    trades = await repo.get_all(user_email=user_email, status="open")
     tickers = list({t["ticker"] for t in trades})
 
     async def _price(ticker: str) -> tuple[str, float | None]:
@@ -52,25 +54,30 @@ async def suggestions(repo: OptionDB):
 
 
 @router.get("/{trade_id}")
-async def get_trade(trade_id: str, repo: OptionDB):
-    trade = await repo.get_by_id(trade_id)
+async def get_trade(trade_id: str, repo: OptionDB, user_email: UserEmail):
+    trade = await repo.get_by_id(trade_id, user_email=user_email)
     if not trade:
         raise HTTPException(404, "Trade not found")
     return trade
 
 
 @router.put("/{trade_id}")
-async def update_trade(trade_id: str, body: OptionTradeUpdate, repo: OptionDB):
+async def update_trade(
+    trade_id: str,
+    body: OptionTradeUpdate,
+    repo: OptionDB,
+    user_email: UserEmail,
+):
     data = body.model_dump(exclude_none=True)
-    trade = await repo.update(trade_id, data)
+    trade = await repo.update(trade_id, data, user_email=user_email)
     if not trade:
         raise HTTPException(404, "Trade not found")
     return trade
 
 
 @router.delete("/{trade_id}")
-async def delete_trade(trade_id: str, repo: OptionDB):
-    deleted = await repo.delete(trade_id)
+async def delete_trade(trade_id: str, repo: OptionDB, user_email: UserEmail):
+    deleted = await repo.delete(trade_id, user_email=user_email)
     if not deleted:
         raise HTTPException(404, "Trade not found")
     return {"success": True}

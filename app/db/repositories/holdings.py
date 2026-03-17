@@ -24,6 +24,12 @@ class HoldingRepository:
             result.append(self._to_dict(doc))
         return result
 
+    async def get_by_id(self, holding_id: str) -> dict | None:
+        doc = await self.col.document(holding_id).get()
+        if not doc.exists:
+            return None
+        return self._to_dict(doc)
+
     async def upsert(self, portfolio_id: str, ticker: str, shares: float, avg_cost: float) -> dict:
         # Find existing holding for this portfolio+ticker
         existing_doc = None
