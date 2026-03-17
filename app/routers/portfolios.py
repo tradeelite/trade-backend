@@ -9,6 +9,7 @@ from app.db.firestore import get_firestore
 from app.db.repositories.holdings import HoldingRepository
 from app.db.repositories.portfolios import PortfolioRepository
 from app.db.schemas import HoldingCreate, PortfolioCreate, PortfolioUpdate, PortfolioWithStats
+from app.routers.auth import get_request_user_email
 from app.services import yahoo_finance as yf_svc
 
 router = APIRouter(prefix="/api/portfolios", tags=["portfolios"])
@@ -24,6 +25,7 @@ def get_holding_repo() -> HoldingRepository:
 
 PortfolioDB = Annotated[PortfolioRepository, Depends(get_portfolio_repo)]
 HoldingDB = Annotated[HoldingRepository, Depends(get_holding_repo)]
+UserEmail = Annotated[str, Depends(get_request_user_email)]
 
 
 # ---------------------------------------------------------------------------
@@ -31,8 +33,12 @@ HoldingDB = Annotated[HoldingRepository, Depends(get_holding_repo)]
 # ---------------------------------------------------------------------------
 
 @router.get("")
-async def list_portfolios(repo: PortfolioDB, holding_repo: HoldingDB) -> list[PortfolioWithStats]:
-    portfolios = await repo.get_all()
+async def list_portfolios(
+    repo: PortfolioDB,
+    holding_repo: HoldingDB,
+    user_email: UserEmail,
+) -> list[PortfolioWithStats]:
+    portfolios = await repo.get_all(user_email=user_email)
     out = []
     for p in portfolios:
         holdings = await holding_repo.get_by_portfolio(p["id"])
@@ -66,30 +72,39 @@ async def list_portfolios(repo: PortfolioDB, holding_repo: HoldingDB) -> list[Po
 
 
 @router.post("", status_code=201)
-async def create_portfolio(body: PortfolioCreate, repo: PortfolioDB):
-    return await repo.create(name=body.name, description=body.description)
+async def create_portfolio(body: PortfolioCreate, repo: PortfolioDB, user_email: UserEmail):
+    return await repo.create(
+        name=body.name,
+        description=body.description,
+        user_email=user_email,
+    )
 
 
 @router.get("/{portfolio_id}")
-async def get_portfolio(portfolio_id: str, repo: PortfolioDB):
-    p = await repo.get_by_id(portfolio_id)
+async def get_portfolio(portfolio_id: str, repo: PortfolioDB, user_email: UserEmail):
+    p = await repo.get_by_id(portfolio_id, user_email=user_email)
     if not p:
         raise HTTPException(404, "Portfolio not found")
     return p
 
 
 @router.put("/{portfolio_id}")
-async def update_portfolio(portfolio_id: str, body: PortfolioUpdate, repo: PortfolioDB):
+async def update_portfolio(
+    portfolio_id: str,
+    body: PortfolioUpdate,
+    repo: PortfolioDB,
+    user_email: UserEmail,
+):
     data = body.model_dump(exclude_none=True)
-    p = await repo.update(portfolio_id, data)
+    p = await repo.update(portfolio_id, data, user_email=user_email)
     if not p:
         raise HTTPException(404, "Portfolio not found")
     return p
 
 
 @router.delete("/{portfolio_id}")
-async def delete_portfolio(portfolio_id: str, repo: PortfolioDB):
-    deleted = await repo.delete(portfolio_id)
+async def delete_portfolio(portfolio_id: str, repo: PortfolioDB, user_email: UserEmail):
+    deleted = await repo.delete(portfolio_id, user_email=user_email)
     if not deleted:
         raise HTTPException(404, "Portfolio not found")
     return {"success": True}
@@ -100,7 +115,15 @@ async def delete_portfolio(portfolio_id: str, repo: PortfolioDB):
 # ---------------------------------------------------------------------------
 
 @router.get("/{portfolio_id}/holdings")
-async def list_holdings(portfolio_id: str, holding_repo: HoldingDB):
+async def list_holdings(
+    portfolio_id: str,
+    holding_repo: HoldingDB,
+    repo: PortfolioDB,
+    user_email: UserEmail,
+):
+    portfolio = await repo.get_by_id(portfolio_id, user_email=user_email)
+    if not portfolio:
+        raise HTTPException(404, "Portfolio not found")
     holdings = await holding_repo.get_by_portfolio(portfolio_id)
 
     async def _enrich(h: dict) -> dict:
@@ -131,7 +154,16 @@ async def list_holdings(portfolio_id: str, holding_repo: HoldingDB):
 
 
 @router.post("/{portfolio_id}/holdings", status_code=201)
-async def upsert_holding(portfolio_id: str, body: HoldingCreate, holding_repo: HoldingDB):
+async def upsert_holding(
+    portfolio_id: str,
+    body: HoldingCreate,
+    holding_repo: HoldingDB,
+    repo: PortfolioDB,
+    user_email: UserEmail,
+):
+    portfolio = await repo.get_by_id(portfolio_id, user_email=user_email)
+    if not portfolio:
+        raise HTTPException(404, "Portfolio not found")
     return await holding_repo.upsert(
         portfolio_id=portfolio_id,
         ticker=body.ticker.upper(),
@@ -141,7 +173,19 @@ async def upsert_holding(portfolio_id: str, body: HoldingCreate, holding_repo: H
 
 
 @router.delete("/{portfolio_id}/holdings")
-async def delete_holding(portfolio_id: str, holding_id: str, holding_repo: HoldingDB):
+async def delete_holding(
+    portfolio_id: str,
+    holding_id: str,
+    holding_repo: HoldingDB,
+    repo: PortfolioDB,
+    user_email: UserEmail,
+):
+    portfolio = await repo.get_by_id(portfolio_id, user_email=user_email)
+    if not portfolio:
+        raise HTTPException(404, "Portfolio not found")
+    holding = await holding_repo.get_by_id(holding_id)
+    if not holding or holding.get("portfolio_id") != portfolio_id:
+        raise HTTPException(404, "Holding not found")
     deleted = await holding_repo.delete(holding_id)
     if not deleted:
         raise HTTPException(404, "Holding not found")

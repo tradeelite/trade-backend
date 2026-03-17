@@ -5,6 +5,25 @@ FastAPI backend for TradeElite. Serves REST endpoints for web and MCP tools for 
 
 ## Key Endpoints
 
+### User-Scoped Data Endpoints
+
+- Portfolio and options routes are user-owned and isolated by request user email:
+  - `GET/POST /api/portfolios`
+  - `GET/PUT/DELETE /api/portfolios/{id}`
+  - `GET/POST/DELETE /api/portfolios/{id}/holdings`
+  - `GET/POST /api/options`
+  - `GET/PUT/DELETE /api/options/{trade_id}`
+  - `GET /api/options/suggestions`
+- User context is read from header `x-user-email` (or query `userEmail` fallback).
+- Legacy docs with missing `user_email` remain visible only to admin for backward compatibility.
+- Admin resolution:
+  - Primary: `ALLOWED_EMAIL` env
+  - Fallback: earliest allowlisted user record
+- Admin-only controls:
+  - `/api/users` list/add/remove
+  - `/api/settings` write (`PUT`)
+  - `/api/users/me` returns current user role (`is_admin`)
+
 ### AI / Analysis
 
 | Endpoint | Cache | Description |

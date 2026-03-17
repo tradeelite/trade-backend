@@ -232,6 +232,7 @@ async def get_sec_filings(ticker: str) -> list[dict]:
 @mcp.tool()
 async def get_portfolios() -> list[dict]:
     """Get all portfolios with holdings count."""
+    import os
     from app.db.firestore import get_firestore
     from app.db.repositories.holdings import HoldingRepository
     from app.db.repositories.portfolios import PortfolioRepository
@@ -240,7 +241,8 @@ async def get_portfolios() -> list[dict]:
     portfolio_repo = PortfolioRepository(db)
     holding_repo = HoldingRepository(db)
 
-    portfolios = await portfolio_repo.get_all()
+    user_email = os.getenv("ALLOWED_EMAIL", "admin@tradeelite.local")
+    portfolios = await portfolio_repo.get_all(user_email=user_email)
     out = []
     for p in portfolios:
         holdings = await holding_repo.get_by_portfolio(p["id"])
@@ -294,11 +296,13 @@ async def get_options_trades(status: str = "open") -> list[dict]:
     Args:
         status: Filter — "open", "closed", or "all". Defaults to "open".
     """
+    import os
     from app.db.firestore import get_firestore
     from app.db.repositories.options import OptionRepository
 
     repo = OptionRepository(get_firestore())
-    trades = await repo.get_all(status=status)
+    user_email = os.getenv("ALLOWED_EMAIL", "admin@tradeelite.local")
+    trades = await repo.get_all(user_email=user_email, status=status)
     return [
         {
             "id": t["id"], "ticker": t["ticker"], "optionType": t["option_type"],
@@ -315,11 +319,13 @@ async def get_options_trades(status: str = "open") -> list[dict]:
 async def get_options_suggestions() -> list[dict]:
     """Get rule-based suggestions for open options positions (profit targets, DTE, assignment risk, earnings)."""
     import asyncio
+    import os
     from app.db.firestore import get_firestore
     from app.db.repositories.options import OptionRepository
 
     repo = OptionRepository(get_firestore())
-    trades = await repo.get_all(status="open")
+    user_email = os.getenv("ALLOWED_EMAIL", "admin@tradeelite.local")
+    trades = await repo.get_all(user_email=user_email, status="open")
     tickers = list({t["ticker"] for t in trades})
 
     async def _price(ticker: str) -> tuple[str, float | None]:
