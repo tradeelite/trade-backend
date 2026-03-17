@@ -29,10 +29,11 @@ steps:
       - --cpu=1
       - --min-instances=0
       - --max-instances=2
-      - --set-env-vars=GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_CLOUD_LOCATION=us-central1,TRADEVIEW_AGENT_RESOURCE_ID=${_AGENT_RESOURCE_ID}
+      - --set-env-vars=GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_CLOUD_LOCATION=us-central1,TRADEVIEW_AGENT_RESOURCE_ID=${_AGENT_RESOURCE_ID},ALLOWED_EMAIL=${_ALLOWED_EMAIL}
 
 substitutions:
   _AGENT_RESOURCE_ID: projects/685436576212/locations/us-central1/reasoningEngines/5427522546725552128
+  _ALLOWED_EMAIL: admin@tradeelite.ai
 
 images:
   - "gcr.io/$PROJECT_ID/trade-backend:$COMMIT_SHA"

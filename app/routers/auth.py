@@ -3,7 +3,10 @@
 import os
 from typing import Annotated
 
-from fastapi import Header, HTTPException, Query
+from fastapi import Depends, Header, HTTPException, Query
+
+from app.db.firestore import get_firestore
+from app.db.repositories.allowed_users import AllowedUsersRepository
 
 
 def get_request_user_email(
@@ -21,3 +24,35 @@ def get_request_user_email(
         return admin_email
 
     raise HTTPException(status_code=401, detail="Missing user context")
+
+
+def get_users_repo() -> AllowedUsersRepository:
+    return AllowedUsersRepository(get_firestore())
+
+
+async def resolve_admin_email(repo: AllowedUsersRepository) -> str:
+    admin_email = os.getenv("ALLOWED_EMAIL", "").strip().lower()
+    if admin_email:
+        return admin_email
+
+    # Fallback for deployments where ALLOWED_EMAIL was not set:
+    # pick earliest allowlisted user as admin anchor.
+    users = await repo.list_all()
+    if not users:
+        return ""
+    users_sorted = sorted(users, key=lambda u: u.get("added_at", ""))
+    return (users_sorted[0].get("email") or "").strip().lower()
+
+
+async def is_admin_email(email: str, repo: AllowedUsersRepository) -> bool:
+    admin_email = await resolve_admin_email(repo)
+    return bool(admin_email and email.lower() == admin_email)
+
+
+async def require_admin_user(
+    user_email: Annotated[str, Depends(get_request_user_email)],
+    repo: Annotated[AllowedUsersRepository, Depends(get_users_repo)],
+) -> str:
+    if not await is_admin_email(user_email, repo):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return user_email

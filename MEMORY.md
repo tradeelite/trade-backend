@@ -22,6 +22,11 @@
   - Primary: `x-user-email` request header
   - Fallback: `userEmail` query param
   - Last fallback: `ALLOWED_EMAIL` for single-admin compatibility
+- Admin resolution:
+  - Primary: `ALLOWED_EMAIL` env
+  - Fallback: earliest `allowed_users` record (for env-missing deployments)
+- Legacy ownership recovery (2026-03-17):
+  - Backfilled `user_email=admin@tradeelite.ai` to 3 ownerless `portfolios` docs
 
 ## Known Gaps
 
