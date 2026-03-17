@@ -109,7 +109,8 @@ async def get_stock_sentiment(ticker: str) -> dict:
 
 @mcp.tool()
 def get_fundamentals(ticker: str) -> dict:
-    """Get fundamental financial metrics: P/E, forward P/E, PEG, margins, ROE, debt ratios.
+    """Get fundamental financial metrics: P/E, forward P/E, PEG, EV/EBITDA, margins, ROE,
+    debt ratios, FCF, market cap, short interest, 52-week range, and more.
 
     Args:
         ticker: Stock ticker symbol (e.g. AAPL, MSFT).
@@ -118,8 +119,53 @@ def get_fundamentals(ticker: str) -> dict:
 
 
 @mcp.tool()
+def get_financial_statements(ticker: str) -> dict:
+    """Get full financial statements from Yahoo Finance (annual + quarterly).
+
+    Income statement: revenue, gross profit, EBITDA, operating income, net income, EPS.
+    Balance sheet: total assets, total liabilities, equity, total debt, cash.
+    Cash flow: operating CF, investing CF, FCF, CapEx, dividends paid, share repurchases.
+
+    Args:
+        ticker: Stock ticker symbol (e.g. AAPL, MSFT, NVDA).
+    """
+    return fund_svc.get_financial_statements(ticker.upper())
+
+
+@mcp.tool()
+def get_insider_transactions(ticker: str) -> dict:
+    """Get recent insider buy/sell transactions from Yahoo Finance (SEC Form 4 filings).
+
+    Returns name, title, transaction type (Buy/Sale/Option Exercise),
+    date, shares, total value, and a net signal (bullish if more buys than sells).
+
+    Args:
+        ticker: Stock ticker symbol.
+    """
+    return fund_svc.get_insider_transactions(ticker.upper())
+
+
+@mcp.tool()
+def get_institutional_holders(ticker: str) -> dict:
+    """Get institutional and mutual fund ownership data from Yahoo Finance (13F filings).
+
+    Returns top 20 institutional holders and top 10 mutual fund holders with:
+    holder name, shares owned, market value, % of float held, and date reported.
+    Also includes major holders summary (% held by insiders vs institutions).
+
+    Args:
+        ticker: Stock ticker symbol.
+    """
+    return fund_svc.get_institutional_holders(ticker.upper())
+
+
+@mcp.tool()
 def get_analyst_ratings(ticker: str) -> dict:
-    """Get analyst consensus ratings: buy/hold/sell counts, target price, recommendation.
+    """Get analyst consensus ratings, price targets, and recent upgrades/downgrades.
+
+    Consensus: strongBuy/buy/hold/sell/strongSell counts, mean/high/low target price.
+    Recent upgrades/downgrades: firm name, from/to grade, action, date (last 20).
+    Recommendation trend: monthly buy/hold/sell counts for the past 6 months.
 
     Args:
         ticker: Stock ticker symbol.
@@ -129,12 +175,22 @@ def get_analyst_ratings(ticker: str) -> dict:
 
 @mcp.tool()
 def get_earnings_history(ticker: str) -> list[dict]:
-    """Get last 4 quarters of earnings history: estimated EPS, actual EPS, surprise %.
+    """Get last 8 quarters of earnings history: estimated EPS, actual EPS, surprise %.
 
     Args:
         ticker: Stock ticker symbol.
     """
     return fund_svc.get_earnings_history(ticker.upper())
+
+
+@mcp.tool()
+def get_dividends(ticker: str) -> dict:
+    """Get dividend yield, payout ratio, ex-dividend date, and full payment history.
+
+    Args:
+        ticker: Stock ticker symbol.
+    """
+    return fund_svc.get_dividends(ticker.upper())
 
 
 @mcp.tool()
@@ -145,6 +201,28 @@ def get_volume_analysis(ticker: str) -> dict:
         ticker: Stock ticker symbol.
     """
     return fund_svc.get_volume_analysis(ticker.upper())
+
+
+# ---------------------------------------------------------------------------
+# SEC EDGAR tools
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def get_sec_filings(ticker: str) -> list[dict]:
+    """Get recent SEC filings (10-K, 10-Q, 8-K) with direct document URLs.
+
+    Completely free — uses SEC EDGAR public API with no rate limit concerns.
+    Returns up to 15 most recent filings with: form type, filing date,
+    accession number, description, and a direct URL to read the document.
+
+    Use this to find the latest annual report (10-K) or quarterly report (10-Q)
+    for deep fundamental research, or 8-K for material events.
+
+    Args:
+        ticker: Stock ticker symbol (e.g. AAPL, MSFT, NVDA).
+    """
+    from app.services import edgar as edgar_svc
+    return await edgar_svc.get_recent_filings(ticker.upper())
 
 
 # ---------------------------------------------------------------------------
