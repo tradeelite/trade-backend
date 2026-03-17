@@ -173,6 +173,19 @@ def compute_technical_signals(ticker: str) -> dict:
             return "flat"
         return "up" if cur > prv else "down" if cur < prv else "flat"
 
+    # ── VWAP (20-day volume-weighted average price) ───────────────────────────
+    vwap_val: float | None = None
+    try:
+        vol_20 = df["volume"].iloc[-20:]
+        close_20 = df["close"].iloc[-20:]
+        vol_sum = float(vol_20.sum())
+        if vol_sum > 0:
+            vwap_val = _f(float((close_20 * vol_20).sum()) / vol_sum)
+    except Exception:
+        pass
+    vwap_signal = _signal(vwap_val is not None and price > vwap_val,
+                          vwap_val is not None and price < vwap_val)
+
     moving_averages = [
         {
             "name": "SMA 20",
@@ -233,6 +246,16 @@ def compute_technical_signals(ticker: str) -> dict:
             "direction": _ma_dir("EMA_50"),
             "signal": _ma_sig(ema50),
             "pctFromPrice": round((price - ema50) / ema50 * 100, 2) if ema50 else None,
+        },
+        {
+            "name": "VWAP (20D)",
+            "period": 20,
+            "type": "VWAP",
+            "value": vwap_val,
+            "priceVsMA": "above" if vwap_val and price > vwap_val else "below",
+            "direction": "flat",
+            "signal": vwap_signal,
+            "pctFromPrice": round((price - vwap_val) / vwap_val * 100, 2) if vwap_val else None,
         },
     ]
 
@@ -390,6 +413,115 @@ def compute_technical_signals(ticker: str) -> dict:
         rel_vol is not None and rel_vol < 0.7,
     )
 
+    # ── Ichimoku Cloud (9, 26, 52) ────────────────────────────────────────────
+    ichi_tenkan: float | None = None
+    ichi_kijun: float | None = None
+    ichi_cloud_top: float | None = None
+    ichi_cloud_bottom: float | None = None
+    ichi_position = "inside"
+    ichi_signal = "Neutral"
+    try:
+        if len(df) >= 52:
+            high = df["high"]
+            low = df["low"]
+            ichi_tenkan = _f((high.rolling(9).max() + low.rolling(9).min()).iloc[-1] / 2)
+            ichi_kijun  = _f((high.rolling(26).max() + low.rolling(26).min()).iloc[-1] / 2)
+            # Current cloud = Senkou values computed 26 bars ago
+            idx = -27 if len(df) > 27 else -len(df)
+            sen_a = _f(((high.rolling(9).max() + low.rolling(9).min()) / 2 +
+                        (high.rolling(26).max() + low.rolling(26).min()) / 2).iloc[idx] / 2)
+            sen_b = _f((high.rolling(52).max() + low.rolling(52).min()).iloc[idx] / 2)
+            if sen_a is not None and sen_b is not None:
+                ichi_cloud_top    = _f(max(sen_a, sen_b))
+                ichi_cloud_bottom = _f(min(sen_a, sen_b))
+                if price > ichi_cloud_top:
+                    ichi_position = "above"
+                    ichi_signal   = "Buy"
+                elif price < ichi_cloud_bottom:
+                    ichi_position = "below"
+                    ichi_signal   = "Sell"
+    except Exception:
+        pass
+
+    # ── RSI (14) Weekly ───────────────────────────────────────────────────────
+    rsi_weekly: float | None = None
+    rsi_weekly_status = "neutral"
+    rsi_weekly_signal = "Neutral"
+    try:
+        df_w = df.resample("W").agg({"open": "first", "high": "max",
+                                      "low": "min", "close": "last",
+                                      "volume": "sum"}).dropna()
+        if len(df_w) >= 15:
+            df_w.ta.rsi(length=14, append=True)
+            rsi_weekly = _col(df_w, "RSI_14")
+            if rsi_weekly is not None:
+                if rsi_weekly < 30:
+                    rsi_weekly_status = "oversold"
+                    rsi_weekly_signal = "Buy"
+                elif rsi_weekly > 70:
+                    rsi_weekly_status = "overbought"
+                    rsi_weekly_signal = "Sell"
+    except Exception:
+        pass
+
+    # ── ROC (Rate of Change) ──────────────────────────────────────────────────
+    df.ta.roc(length=10, append=True)
+    df.ta.roc(length=20, append=True)
+    roc10 = _col(df, "ROC_10")
+    roc20 = _col(df, "ROC_20")
+    roc_signal = _signal(
+        (roc10 is not None and roc10 > 0) or (roc20 is not None and roc20 > 0),
+        (roc10 is not None and roc10 < 0) and (roc20 is not None and roc20 < 0),
+    )
+
+    # ── Accumulation / Distribution ───────────────────────────────────────────
+    acc_dist_trend = "flat"
+    acc_dist_signal = "Neutral"
+    try:
+        df.ta.ad(append=True)
+        ad_series = _col_series(df, "AD")
+        if ad_series is not None and len(ad_series) >= 21:
+            ad_now = float(ad_series.iloc[-1])
+            ad_sma = float(ad_series.iloc[-20:].mean())
+            if ad_now > ad_sma:
+                acc_dist_trend  = "rising"
+                acc_dist_signal = "Buy"
+            elif ad_now < ad_sma:
+                acc_dist_trend  = "falling"
+                acc_dist_signal = "Sell"
+    except Exception:
+        pass
+
+    # ── Relative Strength vs S&P 500 ─────────────────────────────────────────
+    rs_1m: float | None = None
+    rs_3m: float | None = None
+    rs_6m: float | None = None
+    try:
+        spy_df = yf.Ticker("SPY").history(period="400d", interval="1d",
+                                          auto_adjust=True)
+        if spy_df is not None and not spy_df.empty:
+            spy_close = spy_df["Close"]
+            ticker_close = df["close"]
+
+            def _return(series: pd.Series, days: int) -> float | None:
+                if len(series) <= days:
+                    return None
+                old = float(series.iloc[-days - 1])
+                new = float(series.iloc[-1])
+                return round((new - old) / old * 100, 2) if old != 0 else None
+
+            t1m = _return(ticker_close, 21)
+            s1m = _return(spy_close, 21)
+            t3m = _return(ticker_close, 63)
+            s3m = _return(spy_close, 63)
+            t6m = _return(ticker_close, 126)
+            s6m = _return(spy_close, 126)
+            rs_1m = round(t1m - s1m, 2) if t1m is not None and s1m is not None else None
+            rs_3m = round(t3m - s3m, 2) if t3m is not None and s3m is not None else None
+            rs_6m = round(t6m - s6m, 2) if t6m is not None and s6m is not None else None
+    except Exception:
+        pass
+
     # ── Golden / Death Cross ──────────────────────────────────────────────────
     golden_cross = False
     death_cross = False
@@ -423,9 +555,10 @@ def compute_technical_signals(ticker: str) -> dict:
     # ── Composite score ───────────────────────────────────────────────────────
     ma_signals  = [_ma_sig(sma20), _ma_sig(sma50), _ma_sig(sma200),
                    _ma_sig(ema9), _ma_sig(ema21), _ma_sig(ema50)]
-    osc_signals = [rsi_signal, macd_signal_str, stoch_signal, willr_signal, bb_signal]
+    osc_signals = [rsi_signal, macd_signal_str, stoch_signal, willr_signal, bb_signal,
+                   ichi_signal, rsi_weekly_signal, roc_signal]
     ts_signals  = [adx_signal]
-    vol_signals = [obv_signal]
+    vol_signals = [obv_signal, vwap_signal, acc_dist_signal]
     all_signals = ma_signals + osc_signals + ts_signals + vol_signals
 
     buy_count     = all_signals.count("Buy")
@@ -524,6 +657,36 @@ def compute_technical_signals(ticker: str) -> dict:
                 "trend": obv_trend,
                 "signal": obv_signal,
             },
+            {
+                "name": "Ichimoku Cloud",
+                "status": f"{ichi_position} cloud",
+                "trend": f"Top:{ichi_cloud_top:.2f} Bot:{ichi_cloud_bottom:.2f}" if ichi_cloud_top and ichi_cloud_bottom else None,
+                "signal": ichi_signal,
+            },
+            {
+                "name": "RSI (14) Weekly",
+                "value": rsi_weekly,
+                "status": rsi_weekly_status,
+                "signal": rsi_weekly_signal,
+                "levels": {"oversold": 30, "overbought": 70},
+            },
+            {
+                "name": "ROC (10D)",
+                "value": roc10,
+                "signal": _signal(roc10 is not None and roc10 > 0,
+                                  roc10 is not None and roc10 < 0),
+            },
+            {
+                "name": "ROC (20D)",
+                "value": roc20,
+                "signal": _signal(roc20 is not None and roc20 > 0,
+                                  roc20 is not None and roc20 < 0),
+            },
+            {
+                "name": "Acc/Distribution",
+                "trend": acc_dist_trend,
+                "signal": acc_dist_signal,
+            },
         ],
 
         # ── Volume ────────────────────────────────────────────────────────────
@@ -557,6 +720,9 @@ def compute_technical_signals(ticker: str) -> dict:
             "minusDI": adx_minus_di,
             "strength": adx_strength,
             "diControl": adx_di_control,
+            "relativeStrength1M": rs_1m,
+            "relativeStrength3M": rs_3m,
+            "relativeStrength6M": rs_6m,
         },
 
         # ── Snapshot ──────────────────────────────────────────────────────────

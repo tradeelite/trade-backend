@@ -8,6 +8,8 @@ class Settings(BaseSettings):
 
     anthropic_api_key: str = ""
     twelve_data_api_key: str = ""
+    fmp_api_key: str = ""
+    finnhub_api_key: str = ""
     google_cloud_project: str = ""
     google_cloud_location: str = "us-central1"
     tradeview_agent_resource_id: str = ""
