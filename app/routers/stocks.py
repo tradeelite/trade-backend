@@ -11,6 +11,7 @@ from app.services import finnhub as finnhub_svc
 from app.services import fmp as fmp_svc
 from app.services import fundamentals as fund_svc
 from app.services import indicators as ind_svc
+from app.services import reddit as reddit_svc
 from app.services import stocktwits, yahoo_finance as yf_svc
 from app.services import technical_signals as ts_svc
 
@@ -1334,8 +1335,12 @@ VALID_RANGES = {"1D", "1W", "1M", "3M", "1Y", "5Y"}
 _analysis_cache: dict[str, tuple[float, dict]] = {}
 _fundamental_cache: dict[str, tuple[float, dict]] = {}
 _news_cache: dict[str, tuple[float, dict]] = {}
+_social_cache: dict[str, tuple[float, dict]] = {}
+_macro_cache: dict[str, tuple[float, dict]] = {}
 _CACHE_TTL = 600  # 10 minutes
 _NEWS_CACHE_TTL = 300  # 5 minutes
+_SOCIAL_CACHE_TTL = 180  # 3 minutes
+_MACRO_CACHE_TTL = 300  # 5 minutes
 
 
 @router.get("/search")
@@ -1943,6 +1948,244 @@ async def _build_news_analysis(ticker: str) -> dict:
     }
 
 
+async def _build_social_analysis(ticker: str) -> dict:
+    """Build social sentiment analysis from StockTwits + Reddit + Gemini."""
+    import json
+    from datetime import datetime, timezone
+
+    twits_res, reddit_res = await asyncio.gather(
+        stocktwits.get_sentiment(ticker),
+        reddit_svc.get_sentiment(ticker),
+        return_exceptions=True,
+    )
+    twits = twits_res if not isinstance(twits_res, Exception) else {}
+    reddit = reddit_res if not isinstance(reddit_res, Exception) else {}
+
+    tw_bull = twits.get("bullishCount", 0) if isinstance(twits, dict) else 0
+    tw_bear = twits.get("bearishCount", 0) if isinstance(twits, dict) else 0
+    rd_bull = reddit.get("bullishCount", 0) if isinstance(reddit, dict) else 0
+    rd_bear = reddit.get("bearishCount", 0) if isinstance(reddit, dict) else 0
+    bullish_total = int(tw_bull or 0) + int(rd_bull or 0)
+    bearish_total = int(tw_bear or 0) + int(rd_bear or 0)
+    tagged_total = bullish_total + bearish_total
+    bullish_percent = round(bullish_total / tagged_total * 100, 1) if tagged_total else None
+    bearish_percent = round(100 - bullish_percent, 1) if bullish_percent is not None else None
+    signal = "bullish" if (bullish_percent or 50) > 60 else ("bearish" if (bullish_percent or 50) < 40 else "neutral")
+
+    stocktwits_msgs = twits.get("messages", []) if isinstance(twits, dict) else []
+    reddit_posts = reddit.get("posts", []) if isinstance(reddit, dict) else []
+    top_posts = []
+    for m in stocktwits_msgs[:8]:
+        top_posts.append(
+            {
+                "source": "StockTwits",
+                "user": m.get("user"),
+                "text": m.get("body", ""),
+                "url": f"https://stocktwits.com/symbol/{ticker}",
+                "sentiment": (m.get("sentiment") or "").lower() if m.get("sentiment") else None,
+                "createdAt": m.get("createdAt"),
+            }
+        )
+    for p in reddit_posts[:8]:
+        top_posts.append(
+            {
+                "source": "Reddit",
+                "user": p.get("author"),
+                "text": p.get("title", ""),
+                "url": p.get("url"),
+                "sentiment": (p.get("sentiment") or "").lower() if p.get("sentiment") else None,
+                "createdAt": p.get("createdAt"),
+            }
+        )
+
+    trending_topics: list[str] = []
+    analyst_summary = ""
+    analyst_rec = "Hold"
+    analyst_conf = "medium"
+    catalysts: list[str] = []
+    risks: list[str] = []
+    try:
+        import vertexai
+        from vertexai.generative_models import GenerativeModel
+
+        vertexai.init(project=settings.google_cloud_project, location=settings.google_cloud_location)
+        model = GenerativeModel("gemini-2.0-flash-001")
+        samples = "\n".join(
+            f"- [{p['source']}] {str(p.get('text') or '')[:220]} ({p.get('sentiment') or 'unlabeled'})"
+            for p in top_posts[:12]
+        )
+        prompt = (
+            f"You are a social sentiment analyst for {ticker}.\n"
+            f"StockTwits bullish%: {twits.get('bullishPercent')}\n"
+            f"Reddit bullish%: {reddit.get('bullishPercent')}\n"
+            f"Combined bullish%: {bullish_percent}\n"
+            f"Sample social posts:\n{samples}\n\n"
+            "Return ONLY valid JSON:\n"
+            '{"trendingTopics":["3-6 short themes users discuss"],'
+            '"recommendation":"Buy|Hold|Sell|Watch",'
+            '"confidence":"high|medium|low",'
+            '"summary":"2-3 sentence explanation of social sentiment impact",'
+            '"catalysts":["up to 4 positive social-driven factors"],'
+            '"risks":["up to 4 social-driven risks"]}'
+        )
+        resp = await asyncio.to_thread(model.generate_content, prompt)
+        text = resp.text.strip()
+        if "```json" in text:
+            text = text.split("```json")[1].split("```")[0].strip()
+        elif "```" in text:
+            text = text.split("```")[1].split("```")[0].strip()
+        parsed = json.loads(text)
+        trending_topics = parsed.get("trendingTopics", []) or []
+        analyst_rec = parsed.get("recommendation", "Hold")
+        analyst_conf = parsed.get("confidence", "medium")
+        analyst_summary = parsed.get("summary", "")
+        catalysts = parsed.get("catalysts", []) or []
+        risks = parsed.get("risks", []) or []
+    except Exception:
+        analyst_summary = (
+            f"Social discussion for {ticker} is currently {signal}. "
+            f"Combined tagged sentiment is {bullish_percent if bullish_percent is not None else 'N/A'}% bullish."
+        )
+
+    return {
+        "ticker": ticker,
+        "overallSentiment": signal,
+        "metrics": {
+            "bullishPercent": bullish_percent,
+            "bearishPercent": bearish_percent,
+            "totalTaggedMentions": tagged_total,
+            "watchlistCount": twits.get("watchlistCount") if isinstance(twits, dict) else None,
+            "redditPostCount": reddit.get("postCount") if isinstance(reddit, dict) else None,
+        },
+        "sources": {
+            "stocktwits": {
+                "available": isinstance(twits_res, dict),
+                "bullishPercent": twits.get("bullishPercent") if isinstance(twits, dict) else None,
+                "messageCount": len(stocktwits_msgs),
+            },
+            "reddit": {
+                "available": isinstance(reddit_res, dict),
+                "bullishPercent": reddit.get("bullishPercent") if isinstance(reddit, dict) else None,
+                "postCount": reddit.get("postCount") if isinstance(reddit, dict) else 0,
+            },
+            "twitter": {
+                "available": False,
+                "note": "X/Twitter official API requires separate paid access credentials.",
+            },
+        },
+        "trendingTopics": trending_topics,
+        "analyst": {
+            "recommendation": analyst_rec,
+            "confidence": analyst_conf,
+            "summary": analyst_summary,
+            "catalysts": catalysts,
+            "risks": risks,
+        },
+        "posts": top_posts,
+        "asOf": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+async def _build_macro_analysis(ticker: str) -> dict:
+    """Build macro regime snapshot + AI impact analysis for a specific ticker."""
+    import json
+    from datetime import datetime, timezone
+
+    macro_symbols = {
+        "vix": "^VIX",
+        "sp500": "^GSPC",
+        "nasdaq100": "^NDX",
+        "us10yYield": "^TNX",
+        "dollarIndex": "DX-Y.NYB",
+        "gold": "GC=F",
+        "oil": "CL=F",
+        "bitcoin": "BTC-USD",
+    }
+
+    async def _q(label: str, symbol: str):
+        try:
+            q = await asyncio.to_thread(yf_svc.get_quote, symbol)
+            return label, {
+                "symbol": symbol,
+                "name": q.get("name"),
+                "price": q.get("price"),
+                "changePercent": q.get("changePercent"),
+            }
+        except Exception:
+            return label, {
+                "symbol": symbol,
+                "name": symbol,
+                "price": None,
+                "changePercent": None,
+            }
+
+    metrics = dict(await asyncio.gather(*[_q(k, s) for k, s in macro_symbols.items()]))
+    vix_val = (metrics.get("vix") or {}).get("price")
+    us10y = (metrics.get("us10yYield") or {}).get("price")
+    regime = "risk-on"
+    if (vix_val is not None and vix_val >= 25) or (us10y is not None and us10y >= 4.8):
+        regime = "risk-off"
+    elif (vix_val is not None and vix_val <= 15) and (us10y is not None and us10y <= 4.2):
+        regime = "risk-on"
+    else:
+        regime = "mixed"
+
+    summary = ""
+    recommendation = "Hold"
+    confidence = "medium"
+    impacts: list[str] = []
+    risks: list[str] = []
+    try:
+        import vertexai
+        from vertexai.generative_models import GenerativeModel
+
+        vertexai.init(project=settings.google_cloud_project, location=settings.google_cloud_location)
+        model = GenerativeModel("gemini-2.0-flash-001")
+        macro_lines = "\n".join(
+            f"- {k}: price={v.get('price')} change%={v.get('changePercent')}"
+            for k, v in metrics.items()
+        )
+        prompt = (
+            f"You are a macro analyst evaluating impact on {ticker}.\n"
+            f"Current macro snapshot:\n{macro_lines}\n"
+            f"Detected regime: {regime}\n\n"
+            "Return ONLY valid JSON:\n"
+            '{"recommendation":"Buy|Hold|Sell|Watch",'
+            '"confidence":"high|medium|low",'
+            '"summary":"2-3 sentence macro impact summary for this ticker",'
+            '"impacts":["3-5 key macro drivers affecting this ticker"],'
+            '"risks":["3-5 macro risks to monitor"]}'
+        )
+        resp = await asyncio.to_thread(model.generate_content, prompt)
+        text = resp.text.strip()
+        if "```json" in text:
+            text = text.split("```json")[1].split("```")[0].strip()
+        elif "```" in text:
+            text = text.split("```")[1].split("```")[0].strip()
+        parsed = json.loads(text)
+        recommendation = parsed.get("recommendation", "Hold")
+        confidence = parsed.get("confidence", "medium")
+        summary = parsed.get("summary", "")
+        impacts = parsed.get("impacts", []) or []
+        risks = parsed.get("risks", []) or []
+    except Exception:
+        summary = f"Macro backdrop is currently {regime} for {ticker} based on volatility, rates, and broad risk assets."
+
+    return {
+        "ticker": ticker,
+        "regime": regime,
+        "metrics": metrics,
+        "analyst": {
+            "recommendation": recommendation,
+            "confidence": confidence,
+            "summary": summary,
+            "impacts": impacts,
+            "risks": risks,
+        },
+        "asOf": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 @router.get("/{ticker}/news-analysis")
 async def news_analysis(ticker: str):
     """Merged news + AI sentiment synthesis for the News & Sentiment tab."""
@@ -1955,6 +2198,40 @@ async def news_analysis(ticker: str):
     try:
         result = await _build_news_analysis(ticker)
         _news_cache[ticker] = (now, result)
+        return result
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@router.get("/{ticker}/social-analysis")
+async def social_analysis(ticker: str):
+    """Social media sentiment analysis (StockTwits + Reddit + AI analyst)."""
+    ticker = ticker.upper()
+    now = time.time()
+    if ticker in _social_cache:
+        ts, data = _social_cache[ticker]
+        if now - ts < _SOCIAL_CACHE_TTL:
+            return data
+    try:
+        result = await _build_social_analysis(ticker)
+        _social_cache[ticker] = (now, result)
+        return result
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@router.get("/{ticker}/macro-analysis")
+async def macro_analysis(ticker: str):
+    """Macro regime + AI impact analysis for a ticker."""
+    ticker = ticker.upper()
+    now = time.time()
+    if ticker in _macro_cache:
+        ts, data = _macro_cache[ticker]
+        if now - ts < _MACRO_CACHE_TTL:
+            return data
+    try:
+        result = await _build_macro_analysis(ticker)
+        _macro_cache[ticker] = (now, result)
         return result
     except Exception as e:
         raise HTTPException(500, str(e))

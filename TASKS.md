@@ -4,6 +4,13 @@
 - [2026-03-12] Stabilize agent output parsing for reliable rich fundamental extraction.
 
 ## Completed
+- [2026-03-17] Added social media and macro analyst endpoints
+  - New `/api/stocks/{ticker}/social-analysis` (StockTwits + Reddit + Gemini synthesis)
+  - New `/api/stocks/{ticker}/macro-analysis` (macro snapshot + impact synthesis)
+  - Added dedicated caches for social (3 min) and macro (5 min)
+- [2026-03-17] Enhanced technical signals payload
+  - Added support/resistance levels (20D + 50D)
+  - Added VIX market context block (`value`, `changePercent`, `status`, `signal`)
 - [2026-03-17] Admin/regular settings access control + legacy ownership recovery
   - Added admin resolution fallback (uses `ALLOWED_EMAIL`; if missing, earliest allowlisted user)
   - Added `require_admin_user` dependency and enforced admin-only writes for:

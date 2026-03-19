@@ -552,6 +552,37 @@ def compute_technical_signals(ticker: str) -> dict:
     dist_52w_low  = round((price - low_52w)  / low_52w  * 100, 2) if low_52w  else None
     dist_200sma   = round((price - sma200) / sma200 * 100, 2) if sma200 else None
 
+    # ── Support / Resistance levels ──────────────────────────────────────────
+    support_1 = support_2 = resistance_1 = resistance_2 = None
+    try:
+        if len(df) >= 20:
+            support_1 = _f(df["low"].iloc[-20:].min())
+            resistance_1 = _f(df["high"].iloc[-20:].max())
+        if len(df) >= 50:
+            support_2 = _f(df["low"].iloc[-50:].min())
+            resistance_2 = _f(df["high"].iloc[-50:].max())
+    except Exception:
+        pass
+
+    # ── Market Context: VIX ──────────────────────────────────────────────────
+    vix_value: float | None = None
+    vix_change_pct: float | None = None
+    vix_status = "normal"
+    vix_signal = "Neutral"
+    try:
+        vix_info = (yf.Ticker("^VIX").info or {})
+        vix_value = _f(vix_info.get("currentPrice") or vix_info.get("regularMarketPrice"))
+        vix_change_pct = _f(vix_info.get("regularMarketChangePercent"))
+        if vix_value is not None:
+            if vix_value >= 25:
+                vix_status = "elevated"
+                vix_signal = "Sell"
+            elif vix_value <= 15:
+                vix_status = "complacent"
+                vix_signal = "Buy"
+    except Exception:
+        pass
+
     # ── Composite score ───────────────────────────────────────────────────────
     ma_signals  = [_ma_sig(sma20), _ma_sig(sma50), _ma_sig(sma200),
                    _ma_sig(ema9), _ma_sig(ema21), _ma_sig(ema50)]
@@ -723,6 +754,24 @@ def compute_technical_signals(ticker: str) -> dict:
             "relativeStrength1M": rs_1m,
             "relativeStrength3M": rs_3m,
             "relativeStrength6M": rs_6m,
+        },
+
+        # ── Key Levels ───────────────────────────────────────────────────────
+        "supportResistance": {
+            "support": support_1,
+            "resistance": resistance_1,
+            "support2": support_2,
+            "resistance2": resistance_2,
+        },
+
+        # ── Broader Market Context ───────────────────────────────────────────
+        "marketContext": {
+            "vix": {
+                "value": vix_value,
+                "changePercent": vix_change_pct,
+                "status": vix_status,
+                "signal": vix_signal,
+            }
         },
 
         # ── Snapshot ──────────────────────────────────────────────────────────

@@ -6,6 +6,10 @@
 - New dedicated endpoint: `GET /api/stocks/{ticker}/fundamental-analysis`
 - Both endpoints use in-memory cache (10 minutes per ticker).
 - Portfolio and options routes are now user-scoped by `user_email`.
+- Added social and macro analyst endpoints:
+  - `/api/stocks/{ticker}/social-analysis`
+  - `/api/stocks/{ticker}/macro-analysis`
+- Technical signals now include support/resistance and VIX market context.
 
 ## Normalization Strategy
 

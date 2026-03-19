@@ -31,6 +31,8 @@ FastAPI backend for TradeElite. Serves REST endpoints for web and MCP tools for 
 | `GET /api/stocks/{ticker}/ai-analysis` | 10 min | Full orchestrated report via Vertex AI Agent Engine |
 | `GET /api/stocks/{ticker}/fundamental-analysis` | 10 min | Rich fundamental dashboard (direct build, agent as fallback) |
 | `GET /api/stocks/{ticker}/news-analysis` | 5 min | News synthesis — Yahoo Finance + Finnhub + StockTwits + Gemini Flash |
+| `GET /api/stocks/{ticker}/social-analysis` | 3 min | Social sentiment analyst — StockTwits + Reddit + Gemini synthesis |
+| `GET /api/stocks/{ticker}/macro-analysis` | 5 min | Macro regime + ticker impact analyst (VIX, rates, dollar, commodities, crypto) |
 | `GET /api/stocks/{ticker}/technical-signals` | 10 min | Tier 1 indicator stack (see below) |
 | `POST /api/agent/query` | none | TEARIA conversational chat — Gemini Flash direct, per-session history |
 
@@ -66,10 +68,14 @@ FastAPI backend for TradeElite. Serves REST endpoints for web and MCP tools for 
 ### Volatility
 - Bollinger Bands (20, 2)
 - ATR (14)
+- **VIX market context** (live `^VIX` level, regime, and signal)
 
 ### Trend Strength
 - ADX (14)
 - **Relative Strength vs S&P 500** — 1M / 3M / 6M return differential vs SPY
+
+### Levels
+- **Support / Resistance** (20-day and 50-day rolling low/high levels)
 
 ### Composite Score
 All above signals included in buy/sell/neutral counts for overall summary gauge.
