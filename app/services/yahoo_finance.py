@@ -1,6 +1,7 @@
 """Yahoo Finance data service using yfinance."""
 
 from datetime import datetime, timedelta, timezone
+import math
 
 import yfinance as yf
 
@@ -12,6 +13,33 @@ RANGE_MAP = {
     "1Y": {"days": 365,  "interval": "1d"},
     "5Y": {"days": 1825, "interval": "1wk"},
 }
+
+TIMEFRAME_CONFIG = {
+    "1d": {"interval": "1d", "period": "max"},
+    "1h": {"interval": "60m", "period": "730d"},
+    "5m": {"interval": "5m", "period": "60d"},
+    "1m": {"interval": "1m", "period": "8d"},
+}
+
+
+def _normalize_history(hist) -> list[dict]:
+    result = []
+    for ts, row in hist.iterrows():
+        open_value = row.get("Open")
+        close_value = row.get("Close")
+        if open_value is None or close_value is None:
+            continue
+        if math.isnan(float(open_value)) or math.isnan(float(close_value)):
+            continue
+        result.append({
+            "time": int(ts.timestamp()),
+            "open": float(open_value),
+            "high": float(row["High"]),
+            "low": float(row["Low"]),
+            "close": float(close_value),
+            "volume": int(row.get("Volume") or 0),
+        })
+    return result
 
 
 def search_stocks(query: str) -> list[dict]:
@@ -57,20 +85,17 @@ def get_chart(ticker: str, range: str = "1M") -> list[dict]:
     start = end - timedelta(days=cfg["days"])
     t = yf.Ticker(ticker)
     hist = t.history(start=start, end=end, interval=cfg["interval"])
-    result = []
-    for ts, row in hist.iterrows():
-        unix = int(ts.timestamp())
-        if row["Open"] is None or row["Close"] is None:
-            continue
-        result.append({
-            "time": unix,
-            "open": float(row["Open"]),
-            "high": float(row["High"]),
-            "low": float(row["Low"]),
-            "close": float(row["Close"]),
-            "volume": int(row.get("Volume") or 0),
-        })
-    return result
+    return _normalize_history(hist)
+
+
+def get_bars_for_timeframe(ticker: str, timeframe: str) -> list[dict]:
+    cfg = TIMEFRAME_CONFIG.get(timeframe)
+    if not cfg:
+        raise ValueError(f"Unsupported timeframe: {timeframe}")
+
+    t = yf.Ticker(ticker)
+    hist = t.history(period=cfg["period"], interval=cfg["interval"])
+    return _normalize_history(hist)
 
 
 def get_company_summary(ticker: str) -> dict:

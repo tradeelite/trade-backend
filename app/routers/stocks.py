@@ -2,10 +2,12 @@
 
 import asyncio
 import time
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Query
 
 from app.core.config import settings
+from app.db.firestore import get_firestore
 from app.services import edgar as edgar_svc
 from app.services import finnhub as finnhub_svc
 from app.services import fmp as fmp_svc
@@ -16,6 +18,7 @@ from app.services import stocktwits, yahoo_finance as yf_svc
 from app.services import technical_signals as ts_svc
 
 router = APIRouter(prefix="/api/stocks", tags=["stocks"])
+MARKET_SERIES_COLLECTION = "market_series_demo"
 
 
 def _normalize_signal(v: str | None) -> str:
@@ -28,6 +31,12 @@ def _normalize_signal(v: str | None) -> str:
     if v in ("bearish", "down", "negative", "weak", "sell"):
         return "bearish"
     return "neutral"
+
+
+def _chunk_id_for_range(ticker: str, timeframe: str, bars: list[dict]) -> str:
+    start = datetime.fromtimestamp(bars[0]["time"], tz=timezone.utc).strftime("%Y%m%d")
+    end = datetime.fromtimestamp(bars[-1]["time"], tz=timezone.utc).strftime("%Y%m%d")
+    return f"{ticker}_{timeframe}_{start}_{end}"
 
 
 def _normalize_analysis(raw: dict) -> dict:
@@ -1371,6 +1380,48 @@ def chart(ticker: str, range: str = Query("1M")):
         raise HTTPException(500, str(e))
 
 
+@router.get("/{ticker}/stored-bars")
+async def stored_bars(ticker: str, timeframe: str = Query("1d")):
+    symbol = ticker.upper()
+    db = get_firestore()
+    chunks_ref = (
+        db.collection(MARKET_SERIES_COLLECTION)
+        .document(symbol)
+        .collection("timeframes")
+        .document(timeframe)
+        .collection("chunks")
+    )
+
+    docs = chunks_ref.order_by("startTs").limit(1).stream()
+    docs_list = [doc async for doc in docs]
+    if not docs_list:
+        raise HTTPException(
+            404,
+            f"No stored bars found for {symbol} / {timeframe} in {MARKET_SERIES_COLLECTION}",
+        )
+
+    data = docs_list[0].to_dict() or {}
+    bars = data.get("bars") or []
+    if not bars:
+        raise HTTPException(404, f"Stored chunk for {symbol} / {timeframe} has no bars")
+
+    return {
+        "path": docs_list[0].reference.path,
+        "symbol": data.get("symbol", symbol),
+        "timeframe": data.get("timeframe", timeframe),
+        "source": data.get("source"),
+        "range": data.get("range"),
+        "providerInterval": data.get("providerInterval"),
+        "providerPeriod": data.get("providerPeriod"),
+        "count": data.get("count", len(bars)),
+        "startTs": data.get("startTs", bars[0]["time"]),
+        "endTs": data.get("endTs", bars[-1]["time"]),
+        "firstBar": bars[0],
+        "lastBar": bars[-1],
+        "bars": bars,
+    }
+
+
 @router.get("/{ticker}/summary")
 def summary(ticker: str):
     try:
@@ -1952,6 +2003,24 @@ async def _build_social_analysis(ticker: str) -> dict:
     """Build social sentiment analysis from StockTwits + Reddit + Gemini."""
     import json
     from datetime import datetime, timezone
+    import re
+
+    bullish_terms = {
+        "buy", "bull", "bullish", "upside", "breakout", "rally", "long", "accumulate", "beat",
+    }
+    bearish_terms = {
+        "sell", "bear", "bearish", "downside", "breakdown", "dump", "short", "miss", "downgrade",
+    }
+
+    def _classify_text(text: str | None) -> str | None:
+        t = str(text or "").lower()
+        if not t:
+            return None
+        bull_hits = sum(1 for w in bullish_terms if re.search(rf"\b{re.escape(w)}\b", t))
+        bear_hits = sum(1 for w in bearish_terms if re.search(rf"\b{re.escape(w)}\b", t))
+        if bull_hits == bear_hits:
+            return None
+        return "bullish" if bull_hits > bear_hits else "bearish"
 
     twits_res, reddit_res = await asyncio.gather(
         stocktwits.get_sentiment(ticker),
@@ -1975,6 +2044,7 @@ async def _build_social_analysis(ticker: str) -> dict:
     stocktwits_msgs = twits.get("messages", []) if isinstance(twits, dict) else []
     reddit_posts = reddit.get("posts", []) if isinstance(reddit, dict) else []
     top_posts = []
+    supplemental_context = []
     for m in stocktwits_msgs[:8]:
         top_posts.append(
             {
@@ -1998,6 +2068,23 @@ async def _build_social_analysis(ticker: str) -> dict:
             }
         )
 
+    try:
+        fallback_news = await asyncio.to_thread(yf_svc.get_news, ticker, 8)
+    except Exception:
+        fallback_news = []
+    for n in fallback_news[:8]:
+        text = n.get("title") or ""
+        supplemental_context.append(
+            {
+                "source": "Yahoo Finance News",
+                "user": n.get("publisher") or "news",
+                "text": text,
+                "url": n.get("url") or f"https://finance.yahoo.com/quote/{ticker}",
+                "sentiment": _classify_text(text),
+                "createdAt": n.get("publishedAt"),
+            }
+        )
+
     trending_topics: list[str] = []
     analyst_summary = ""
     analyst_rec = "Hold"
@@ -2010,21 +2097,30 @@ async def _build_social_analysis(ticker: str) -> dict:
 
         vertexai.init(project=settings.google_cloud_project, location=settings.google_cloud_location)
         model = GenerativeModel("gemini-2.0-flash-001")
-        samples = "\n".join(
+        social_samples = "\n".join(
             f"- [{p['source']}] {str(p.get('text') or '')[:220]} ({p.get('sentiment') or 'unlabeled'})"
             for p in top_posts[:12]
+        )
+        supplemental_samples = "\n".join(
+            f"- [{p['source']}] {str(p.get('text') or '')[:220]} ({p.get('sentiment') or 'unlabeled'})"
+            for p in supplemental_context[:6]
         )
         prompt = (
             f"You are a social sentiment analyst for {ticker}.\n"
             f"StockTwits bullish%: {twits.get('bullishPercent')}\n"
             f"Reddit bullish%: {reddit.get('bullishPercent')}\n"
             f"Combined bullish%: {bullish_percent}\n"
-            f"Sample social posts:\n{samples}\n\n"
+            f"StockTwits message count: {len(stocktwits_msgs)}\n"
+            f"Reddit post count: {len(reddit_posts)}\n"
+            "X/Twitter coverage: unavailable without separate paid API credentials\n"
+            "Facebook coverage: unavailable without separate Graph API/app review setup\n"
+            f"Direct social posts:\n{social_samples or '- none'}\n\n"
+            f"Supplemental market context headlines:\n{supplemental_samples or '- none'}\n\n"
             "Return ONLY valid JSON:\n"
             '{"trendingTopics":["3-6 short themes users discuss"],'
             '"recommendation":"Buy|Hold|Sell|Watch",'
             '"confidence":"high|medium|low",'
-            '"summary":"2-3 sentence explanation of social sentiment impact",'
+            '"summary":"2-3 sentence explanation of social sentiment impact; distinguish direct social coverage vs supplemental context when relevant",'
             '"catalysts":["up to 4 positive social-driven factors"],'
             '"risks":["up to 4 social-driven risks"]}'
         )
@@ -2042,10 +2138,16 @@ async def _build_social_analysis(ticker: str) -> dict:
         catalysts = parsed.get("catalysts", []) or []
         risks = parsed.get("risks", []) or []
     except Exception:
-        analyst_summary = (
-            f"Social discussion for {ticker} is currently {signal}. "
-            f"Combined tagged sentiment is {bullish_percent if bullish_percent is not None else 'N/A'}% bullish."
-        )
+        if top_posts:
+            analyst_summary = (
+                f"Direct social discussion for {ticker} is currently {signal}. "
+                f"Combined tagged sentiment is {bullish_percent if bullish_percent is not None else 'N/A'}% bullish."
+            )
+        else:
+            analyst_summary = (
+                f"Direct StockTwits and Reddit coverage for {ticker} is sparse right now. "
+                "X/Twitter and Facebook are not connected, so the social view has limited confidence."
+            )
 
     return {
         "ticker": ticker,
@@ -2072,6 +2174,15 @@ async def _build_social_analysis(ticker: str) -> dict:
                 "available": False,
                 "note": "X/Twitter official API requires separate paid access credentials.",
             },
+            "facebook": {
+                "available": False,
+                "note": "Facebook Graph API requires app setup, review, and approved permissions.",
+            },
+            "supplementalContext": {
+                "available": True,
+                "used": bool(supplemental_context),
+                "headlineCount": len(supplemental_context),
+            },
         },
         "trendingTopics": trending_topics,
         "analyst": {
@@ -2082,6 +2193,7 @@ async def _build_social_analysis(ticker: str) -> dict:
             "risks": risks,
         },
         "posts": top_posts,
+        "supplementalContext": supplemental_context,
         "asOf": datetime.now(timezone.utc).isoformat(),
     }
 
